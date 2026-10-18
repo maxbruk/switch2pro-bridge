@@ -1,0 +1,114 @@
+"""Constants and hardware protocols for Nintendo Switch 2 and Switch Pro Controllers."""
+
+# USB / Bluetooth Hardware Identifiers
+NINTENDO_VENDOR_ID = 0x057E
+SWITCH2_PRO_PID = 0x2069
+SWITCH1_PRO_PID = 0x2009
+NSO_GAMECUBE_PID = 0x2073
+
+SUPPORTED_PIDS = (SWITCH2_PRO_PID, SWITCH1_PRO_PID, NSO_GAMECUBE_PID)
+
+DEVICE_NAMES = {
+    SWITCH2_PRO_PID: "Nintendo Switch 2 Pro Controller",
+    SWITCH1_PRO_PID: "Nintendo Switch Pro Controller",
+    NSO_GAMECUBE_PID: "Nintendo Switch GameCube Controller",
+}
+
+# Bluetooth Low Energy (BLE) Identifiers
+NINTENDO_BLE_MANUFACTURER_ID = 0x0553
+SW2_SERVICE_UUID = "ab7de9be-89fe-49ad-828f-118f09df7fd0"
+INPUT_REPORT_UUID = "ab7de9be-89fe-49ad-828f-118f09df7fd2"
+COMMAND_WRITE_UUID = "649d4ac9-8eb7-4e6c-af44-1ea54fe5f005"
+COMMAND_RESPONSE_UUID = "c765a961-d9d8-4d36-a20a-5315b111836a"
+VIBRATION_WRITE_PRO_UUID = "cc483f51-9258-427d-a939-630c31f72b05"
+
+# BLE Pairing Commands (Switch 2 protocol)
+COMMAND_PAIR = 0x15
+SUBCOMMAND_PAIR_SET_MAC = 0x01
+SUBCOMMAND_PAIR_STEP1 = 0x04
+SUBCOMMAND_PAIR_STEP2 = 0x02
+SUBCOMMAND_PAIR_FINISH = 0x03
+
+# Host handshake payloads for Bluetooth LE bonding
+PAIRING_STEP1_BYTES = bytes([
+    0x00, 0xEA, 0xBD, 0x47, 0x13, 0x89, 0x35, 0x42,
+    0xC6, 0x79, 0xEE, 0x07, 0xF2, 0x53, 0x2C, 0x6C, 0x31
+])
+PAIRING_STEP2_BYTES = bytes([
+    0x00, 0x40, 0xB0, 0x8A, 0x5F, 0xCD, 0x1F, 0x9B,
+    0x41, 0x12, 0x5C, 0xAC, 0xC6, 0x3F, 0x38, 0xA0, 0x73
+])
+
+# Backward-compatibility aliases
+SUBCOMMAND_PAIR_LTK1 = SUBCOMMAND_PAIR_STEP1
+SUBCOMMAND_PAIR_LTK2 = SUBCOMMAND_PAIR_STEP2
+LTK1_BYTES = PAIRING_STEP1_BYTES
+LTK2_BYTES = PAIRING_STEP2_BYTES
+
+# USB HID Report IDs
+REPORT_ID_COMMON = 0x05      # Standard unified Switch 2 report
+REPORT_ID_PRO2 = 0x09        # Native Pro 2 report (power-on)
+REPORT_ID_GAMECUBE = 0x0A    # Native GameCube report
+OUTPUT_REPORT_ID_PRO2 = 0x02 # Pro Controller output report (commands + rumble)
+OUTPUT_REPORT_ID_GC = 0x03   # GameCube output report
+PRO2_OUTPUT_REPORT_BODY_SIZE = 0x2A
+USB_INPUT_REPORT_SIZE = 64
+
+# Handshake / Initialization commands over USB
+USB_INIT_CMD = bytes([
+    0x03, 0x91, 0x00, 0x0D, 0x00, 0x08,
+    0x00, 0x00, 0x01, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+])
+USB_SET_LED_CMD = bytes([
+    0x09, 0x91, 0x00, 0x07, 0x00, 0x08,
+    0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+])
+USB_FEATURE_02_CMD = bytes([
+    0x0C, 0x91, 0x00, 0x02, 0x00, 0x04,
+    0x00, 0x00, 0x27, 0x00, 0x00, 0x00
+])
+USB_FEATURE_04_CMD = bytes([
+    0x0C, 0x91, 0x00, 0x04, 0x00, 0x04,
+    0x00, 0x00, 0x27, 0x00, 0x00, 0x00
+])
+USB_SELECT_COMMON_CMD = bytes([
+    0x03, 0x91, 0x00, 0x0A, 0x00, 0x04,
+    0x00, 0x00, REPORT_ID_COMMON, 0x00, 0x00, 0x00
+])
+
+# Complete USB Startup Sequence
+USB_STARTUP_COMMANDS = (
+    USB_INIT_CMD,
+    USB_SET_LED_CMD,
+    USB_FEATURE_02_CMD,
+    USB_FEATURE_04_CMD,
+    USB_SELECT_COMMON_CMD,
+)
+
+# Button Bitmasks in Report 0x05
+BTN_Y = 0x00000001
+BTN_X = 0x00000002
+BTN_B = 0x00000004
+BTN_A = 0x00000008
+BTN_SR_R = 0x00000010
+BTN_SL_R = 0x00000020
+BTN_R = 0x00000040
+BTN_ZR = 0x00000080
+BTN_MINUS = 0x00000100
+BTN_PLUS = 0x00000200
+BTN_R_THUMB = 0x00000400
+BTN_L_THUMB = 0x00000800
+BTN_HOME = 0x00001000
+BTN_CAPTURE = 0x00002000
+BTN_C = 0x00004000
+BTN_DPAD_DOWN = 0x00010000
+BTN_DPAD_UP = 0x00020000
+BTN_DPAD_RIGHT = 0x00040000
+BTN_DPAD_LEFT = 0x00080000
+BTN_SR_L = 0x00100000
+BTN_SL_L = 0x00200000
+BTN_L = 0x00400000
+BTN_ZL = 0x00800000
+BTN_GR = 0x01000000  # Grip Right (Back Right Paddle)
+BTN_GL = 0x02000000  # Grip Left (Back Left Paddle)
+
