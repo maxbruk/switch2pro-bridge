@@ -10,7 +10,7 @@
 [![Author](https://img.shields.io/badge/Developed%20by-Max%20Bruk-0284C7?style=flat-square&logo=github&logoColor=white)](https://github.com/maxbruk)
 
 <p>
-  Connect your Nintendo Switch 2 Pro Controller (and Switch 1 Pro Controller) to Windows PC as a virtual Xbox 360 controller over USB-C and Bluetooth.
+  Connect your Nintendo Switch 2 Pro Controller (and Switch 1 Pro Controller) to Windows PC over USB-C and Bluetooth as a virtual Xbox 360 or motion-enabled DualShock 4 controller with Cemuhook DSU gyroscope streaming.
 </p>
 
 [Quick Start](#quick-start) • [Features](#features) • [How to Connect](#how-to-connect) • [Developer Setup](#developer-setup) • [Technical Details](#how-it-works-technical-details) • [Disclaimer](#disclaimer)
@@ -23,7 +23,7 @@
 
 No Python or programming knowledge required.
 
-1. **Download**: Grab the latest `Switch2ProBridge-v1.0.0-Windows-x64.zip` from the [Releases](https://github.com/maxbruk) page.
+1. **Download**: Grab the latest `Switch2ProBridge-v2.0.0-Windows-x64.zip` from the [Releases](https://github.com/maxbruk) page.
 2. **Extract**: Unzip the folder anywhere on your PC and run `Switch2ProBridge.exe`.
 3. **Driver Setup**: If prompted, click "Install Driver" to install the ViGEmBus virtual controller driver (or run `drivers/ViGEmBusSetup_x64.msi` once).
 4. **Connect & Play**: Plug in via USB-C or hold the Sync button for Bluetooth. Launch Steam, Xbox Game Pass, Epic Games, or any emulator - your controller will work right away.
@@ -32,13 +32,17 @@ No Python or programming knowledge required.
 
 ## Features
 
+- **6-Axis Gyroscope & Accelerometer (v2.0)**: Real-time decoding of the controller's internal IMU (+/- 8g accelerometer and +/- 2000 deg/s gyroscope).
+- **HD Rumble 2 Haptic Feedback**: Full force-feedback translation from PC games (Xbox 360 and DualShock 4 motors) into the Switch 2 Pro Controller's dual linear resonant actuators over USB-C and Bluetooth, with a built-in test trigger.
+- **Dual Output Emulation (Xbox 360 & DualShock 4)**: Switch on the fly between Xbox 360 (XInput) and DualShock 4 (`DS4_REPORT_EX` via ViGEmBus) for native gyroscope aiming in Fortnite, Call of Duty, Steam Input, and PlayStation PC ports.
+- **Cemuhook DSU Motion Server (UDP 26760)**: Built-in zero-dependency DSU protocol server for direct motion streaming to Cemu, Dolphin, Ryujinx, Yuzu, and Citra.
 - **Wired USB-C (250 Hz)**: Direct low-latency connection over WinUSB with Windows 1 ms multimedia scheduling (`timeBeginPeriod(1)`).
 - **Wireless Bluetooth LE**: Automated pairing using standard Bluetooth Low Energy (BLE) handshake and bonding without entering PINs or configuring Windows Bluetooth menus.
 - **Solid Player 1 LED**: Automatically assigns Player 1 upon connection, turning LED 1 solid green and stopping the sweeping search flash.
 - **12-Bit Analog Sticks**: High-resolution stick coordinate decoding with smooth radial deadzones and zero-flicker packet parsing.
 - **Rear Paddle Mapping (GL & GR)**: Map the Switch 2 Pro Controller's back grip paddles to L3 (Sprint), R3 (Crouch), bumpers, triggers, face buttons, or disable them in settings.
 - **Layout Toggle**: One-click switch between physical Nintendo button positions (A on right, B on bottom) and standard Xbox letter layout (A=A, B=B).
-- **Real-Time Visualizer**: 60 FPS dashboard showing stick crosshairs, button presses, battery percentage, and connection latency.
+- **Real-Time Visualizer**: 60 FPS dashboard showing stick crosshairs, button presses, live 6-axis IMU motion gauges, battery percentage, and connection latency.
 - **Standalone Portable App**: Single `.exe` with all dependencies bundled - zero external installations needed.
 
 ---
@@ -85,7 +89,7 @@ uv run python build_standalone.py
 ```
 Output files are placed in `dist/`:
 - `dist/Switch2ProBridge.exe`
-- `dist/Switch2ProBridge-v1.0.0-Windows-x64.zip`
+- `dist/Switch2ProBridge-v2.0.0-Windows-x64.zip`
 
 ---
 
@@ -93,9 +97,9 @@ Output files are placed in `dist/`:
 
 For those interested in the technical implementation details:
 
-- **USB Handshake**: The Switch 2 Pro Controller (VID `0x057E`, PID `0x2069`) starts in an idle composite state (Report `0x09`). Sending initialization control packets `0x80 0x02` and `0x80 0x04` over WinUSB interface 1 enables full-speed 250 Hz input streaming (Report `0x05`).
-- **Bluetooth LE Bonding**: The controller communicates via custom GATT services (`ab7de9be-89fe-49ad-828f-118f09df7fd0`). The connector completes the two-stage host pairing exchange (host MAC address registration and confirmation handshake) directly in user space.
-- **XInput Emulation**: Decoded button states and 12-bit analog coordinates are translated into a virtual Xbox 360 controller via the ViGEmBus kernel driver (`vgamepad`), making the controller natively recognized by all Windows games.
+- **USB Handshake**: The Switch 2 Pro Controller (VID `0x057E`, PID `0x2069`) starts in an idle composite state (Report `0x09`). Sending initialization control packets `0x80 0x02` and `0x80 0x04` (feature mask `0x27` enabling IMU sensors) over WinUSB interface 1 enables full-speed 250 Hz input and 6-axis motion streaming (Report `0x05`).
+- **Bluetooth LE Bonding**: The controller communicates via custom GATT services (`ab7de9be-89fe-49ad-828f-118f09df7fd0`). The connector completes the two-stage host pairing exchange (host MAC address registration and confirmation handshake) and enables IMU features directly in user space.
+- **Dual Controller & Motion Emulation**: Decoded button states, 12-bit analog sticks, and 6-axis IMU telemetry are translated into either a standard Xbox 360 virtual controller (`VX360Gamepad`) or a motion-capable DualShock 4 virtual controller (`VDS4Gamepad` with `DS4_REPORT_EX` via ViGEmBus), alongside an optional Cemuhook DSU UDP motion server on port 26760.
 
 ---
 
@@ -104,16 +108,19 @@ For those interested in the technical implementation details:
 ```
 switch2pro-bridge/
 ├── constants.py          # Hardware VIDs, PIDs, BLE UUIDs, and packet definitions
-├── report_parser.py      # Input report decoding (0x05 / 0x09), stick math, and deadzones
+├── report_parser.py      # Input report decoding (0x05 / 0x09), 6-axis IMU math, and deadzones
 ├── usb_connector.py      # WinUSB communication loop & 250 Hz packet pipeline
 ├── ble_connector.py      # Bleak WinRT GATT connection, pairing handshake & notification stream
+├── virtual_gamepad.py    # Unified virtual gamepad base interface
 ├── virtual_xinput.py     # Virtual Xbox 360 emulation via ViGEmBus (vgamepad)
-├── app_core.py           # Coordinator handling auto-reconnect and device state
-├── gui.py                # CustomTkinter Dark Mode GUI with real-time visualizer
+├── virtual_ds4.py        # Virtual DualShock 4 emulation with 6-axis IMU via ViGEmBus
+├── dsu_server.py         # Zero-dependency Cemuhook DSU motion UDP server (port 26760)
+├── app_core.py           # Coordinator handling output mode switching, auto-reconnect, and state
+├── gui.py                # CustomTkinter Dark Mode GUI with real-time 6-axis visualizer
 ├── build_standalone.py   # Automated PyInstaller distribution packager
 ├── Switch2ProBridge.spec  # PyInstaller packaging configuration
 ├── drivers/              # Official ViGEmBus 64-bit driver installer
-└── tests/                # Automated pytest regression suite
+└── tests/                # Automated pytest regression & motion test suite
 ```
 
 ---
@@ -131,3 +138,5 @@ All product names, trademarks, and registered trademarks (including "Nintendo Sw
 Distributed under the [MIT License](LICENSE).
 
 Developed by [Max Bruk](https://github.com/maxbruk).
+
+Note: This project is 100% vibe coded.

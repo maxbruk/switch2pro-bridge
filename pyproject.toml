@@ -1,7 +1,7 @@
 [project]
 name = "switch2pro-connector"
-version = "1.0.0"
-description = "One-click Nintendo Switch 2 Pro Controller Connector for Windows (USB-C & Bluetooth)"
+version = "2.0.0"
+description = "One-click Nintendo Switch 2 Pro Controller Bridge for Windows (USB-C, Bluetooth, 6-Axis Gyroscope, Xbox 360 & DualShock 4)"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [

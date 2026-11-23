@@ -112,3 +112,9 @@ BTN_ZL = 0x00800000
 BTN_GR = 0x01000000  # Grip Right (Back Right Paddle)
 BTN_GL = 0x02000000  # Grip Left (Back Left Paddle)
 
+# Switch 2 LRA HD Rumble 2 Constants
+RUMBLE_MAX_AMPLITUDE = 29000
+RUMBLE_HIGH_FREQ = 0x0187
+RUMBLE_LOW_FREQ = 0x0112
+RUMBLE_INTERVAL_SEC = 0.015
+

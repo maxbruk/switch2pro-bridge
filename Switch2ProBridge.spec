@@ -23,6 +23,9 @@ hiddenimports = [
     'hid',
     'yaml',
     'darkdetect',
+    'dsu_server',
+    'virtual_ds4',
+    'virtual_gamepad',
 ]
 
 for pkg in ['customtkinter', 'vgamepad', 'bleak']:

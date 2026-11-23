@@ -24,20 +24,210 @@ from app_core import ControllerManager
 from report_parser import ControllerState
 from virtual_xinput import check_vigem_driver_available, install_vigem_driver
 
+
+def _ensure_tcl_tk_env() -> None:
+    """Ensure Tcl/Tk initialization scripts are discoverable in virtual environments."""
+    if getattr(sys, "frozen", False):
+        return
+    for base in (getattr(sys, "base_prefix", sys.prefix), sys.prefix):
+        tcl_dir = os.path.join(base, "tcl", "tcl8.6")
+        tk_dir = os.path.join(base, "tcl", "tk8.6")
+        if os.path.isdir(tcl_dir) and not os.environ.get("TCL_LIBRARY"):
+            os.environ["TCL_LIBRARY"] = tcl_dir
+        if os.path.isdir(tk_dir) and not os.environ.get("TK_LIBRARY"):
+            os.environ["TK_LIBRARY"] = tk_dir
+
+
+_ensure_tcl_tk_env()
+
 # Set application theme
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
+
+DEFAULT_SETTINGS = {
+    "layout": "nintendo",
+    "deadzone": 0.05,
+    "auto_connect": True,
+    "gl_mapping": "L3",
+    "gr_mapping": "R3",
+    "output_mode": "xbox",
+    "dsu_enabled": False,
+}
+
+
+def get_settings_path(appdata_dir: Optional[str] = None) -> str:
+    """Resolve the JSON settings file path, creating directories if needed."""
+    app_data = appdata_dir if appdata_dir is not None else os.getenv("APPDATA")
+    if app_data:
+        folder = os.path.join(app_data, "Switch2ProConnect")
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, "settings.json")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+
+
+def load_settings(filepath: Optional[str] = None) -> dict:
+    """Load settings from JSON with schema validation, default fallbacks, and alias migration."""
+    if filepath is None:
+        filepath = get_settings_path()
+
+    result = dict(DEFAULT_SETTINGS)
+    if not os.path.exists(filepath):
+        return result
+
+    try:
+        if os.path.getsize(filepath) == 0:
+            return result
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return result
+    except Exception:
+        return result
+
+    # 1. Output Mode ("xbox" or "ds4")
+    raw_mode = data.get("output_mode")
+    if isinstance(raw_mode, str):
+        low_mode = raw_mode.strip().lower()
+        if "ds4" in low_mode or "dualshock" in low_mode:
+            result["output_mode"] = "ds4"
+        elif "xbox" in low_mode or "xinput" in low_mode:
+            result["output_mode"] = "xbox"
+        else:
+            result["output_mode"] = "xbox"
+    else:
+        result["output_mode"] = "xbox"
+
+    # 2. DSU Server / Enabled (supports alias "dsu_server")
+    if "dsu_enabled" in data:
+        raw_dsu = data["dsu_enabled"]
+    elif "dsu_server" in data:
+        raw_dsu = data["dsu_server"]
+    else:
+        raw_dsu = False
+    result["dsu_enabled"] = raw_dsu if isinstance(raw_dsu, bool) else False
+
+    # 3. Layout (supports alias "button_layout")
+    if "layout" in data:
+        raw_layout = data["layout"]
+    elif "button_layout" in data:
+        raw_layout = data["button_layout"]
+    else:
+        raw_layout = "nintendo"
+    if isinstance(raw_layout, str):
+        low_layout = raw_layout.strip().lower()
+        if "xbox" in low_layout:
+            result["layout"] = "xbox"
+        elif "nintendo" in low_layout:
+            result["layout"] = "nintendo"
+        else:
+            result["layout"] = "nintendo"
+    else:
+        result["layout"] = "nintendo"
+
+    # 4. Deadzone (float clamped to [0.0, 0.20])
+    raw_dz = data.get("deadzone")
+    try:
+        val_dz = float(raw_dz)
+        if 0.0 <= val_dz <= 0.20:
+            result["deadzone"] = val_dz
+        else:
+            result["deadzone"] = 0.05
+    except (TypeError, ValueError):
+        result["deadzone"] = 0.05
+
+    # 5. Auto Connect (bool)
+    raw_ac = data.get("auto_connect")
+    result["auto_connect"] = raw_ac if isinstance(raw_ac, bool) else True
+
+    # 6. GL & GR Paddle mappings
+    valid_paddles = {"L3", "R3", "LB", "RB", "LT", "RT", "A", "B", "X", "Y", "Disabled"}
+    raw_gl = data.get("gl_mapping")
+    if isinstance(raw_gl, str) and raw_gl in valid_paddles:
+        result["gl_mapping"] = raw_gl
+    else:
+        result["gl_mapping"] = "L3"
+
+    raw_gr = data.get("gr_mapping")
+    if isinstance(raw_gr, str) and raw_gr in valid_paddles:
+        result["gr_mapping"] = raw_gr
+    else:
+        result["gr_mapping"] = "R3"
+
+    # 7. Haptic Vibration (Rumble) — kept optional on result when stored to preserve DEFAULT_SETTINGS schema
+    if "rumble_enabled" in data and isinstance(data["rumble_enabled"], bool):
+        result["rumble_enabled"] = data["rumble_enabled"]
+
+    return result
+
+
+def save_settings(settings: dict, filepath: Optional[str] = None) -> bool:
+    """Atomically save settings to JSON via a temporary file."""
+    if filepath is None:
+        filepath = get_settings_path()
+    try:
+        parent = os.path.dirname(filepath)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp_path = filepath + ".tmp"
+
+        payload = dict(settings)
+        # Maintain backward-compatible aliases in saved JSON
+        if "dsu_enabled" in payload and "dsu_server" not in payload:
+            payload["dsu_server"] = payload["dsu_enabled"]
+        elif "dsu_server" in payload and "dsu_enabled" not in payload:
+            payload["dsu_enabled"] = payload["dsu_server"]
+
+        if "layout" in payload and "button_layout" not in payload:
+            payload["button_layout"] = payload["layout"]
+        elif "button_layout" in payload and "layout" not in payload:
+            payload["layout"] = payload["button_layout"]
+
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, filepath)
+        return True
+    except (OSError, IOError, Exception):
+        return False
+
+
+def determine_imu_status(state: Optional[ControllerState], is_connected: bool) -> tuple[str, str, str]:
+    """Determine IMU activity status pill text and colors.
+
+    Returns:
+        tuple[str, str, str]: (badge_text, text_color, fg_color)
+    """
+    if not is_connected or state is None or not getattr(state, "has_motion", False):
+        return ("○ IMU N/A", "#6B7280", "#262626")
+
+    gyro_mag = (state.gyro_x ** 2 + state.gyro_y ** 2 + state.gyro_z ** 2) ** 0.5
+    accel_mag = (state.accel_x ** 2 + state.accel_y ** 2 + state.accel_z ** 2) ** 0.5
+    accel_delta = abs(accel_mag - 1.0)
+
+    if gyro_mag > 1.5 or accel_delta > 0.08:
+        return ("● IMU ACTIVE", "#10B981", "#064E3B")
+    return ("● IMU IDLE", "#9CA3AF", "#2C2C2E")
+
+
+def format_imu_telemetry(state: ControllerState) -> tuple[str, str]:
+    """Format 3-axis accelerometer and gyroscope telemetry for display."""
+    accel_str = f"X: {state.accel_x:+.2f}g  Y: {state.accel_y:+.2f}g  Z: {state.accel_z:+.2f}g"
+    gyro_str = f"P: {state.gyro_x:+.1f}  Y: {state.gyro_y:+.1f}  R: {state.gyro_z:+.1f}"
+    return accel_str, gyro_str
 
 
 class Switch2ProApp(ctk.CTk):
     """Main Application Window for Switch 2 Pro Controller Connector."""
 
-    def __init__(self):
+    def __init__(self, settings_path: Optional[str] = None, auto_start_detector: bool = True):
+        _ensure_tcl_tk_env()
         super().__init__()
+        self.settings_file = settings_path
 
         self.title("Switch 2 Pro Connect")
-        self.geometry("640x800")
-        self.minsize(580, 720)
+        self.geometry("640x840")
+        self.minsize(580, 740)
 
         # High-DPI Windows Taskbar and Window Icon Setup
         self._setup_window_icons()
@@ -61,17 +251,30 @@ class Switch2ProApp(ctk.CTk):
         self._prev_ry: float = 0.0
         self._prev_battery: int = -1
 
+        # IMU dirty-checking caches
+        self._prev_imu_status: str = ""
+        self._prev_ax: float = 0.0
+        self._prev_ay: float = 0.0
+        self._prev_az: float = 0.0
+        self._prev_gx: float = 0.0
+        self._prev_gy: float = 0.0
+        self._prev_gz: float = 0.0
+
         self._build_ui()
         self._load_settings()
 
         # Start smooth 60 FPS visualizer tick loop
         self._schedule_visualizer_tick()
 
-        # Start auto detector by default
-        self.manager.start_auto_detector()
+        # Start auto detector if requested
+        if auto_start_detector:
+            self.manager.start_auto_detector()
 
         # Initial driver check
         self._refresh_driver_status()
+
+        # Intercept window close for clean teardown
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
     def _setup_window_icons(self):
         """Set up razor-sharp native icons for both Taskbar and Window Titlebar."""
@@ -164,7 +367,7 @@ class Switch2ProApp(ctk.CTk):
 
         driver_label = ctk.CTkLabel(
             self.driver_card,
-            text="⚠️ Xbox Virtual Controller Driver Required\nInstall ViGEmBus driver so Windows games recognize the controller as an Xbox 360 controller.",
+            text="⚠️ Virtual Gamepad Driver Required\nInstall ViGEmBus driver so Windows games recognize the controller as an Xbox 360 or DualShock 4 controller.",
             font=ctk.CTkFont(size=12),
             text_color="#FDE68A",
             justify="left",
@@ -209,22 +412,27 @@ class Switch2ProApp(ctk.CTk):
         # --- Device Details Card ---
         self.info_card = ctk.CTkFrame(content_frame, fg_color="#1C1C1E", corner_radius=14)
         self.info_card.grid(row=2, column=0, pady=(0, 16), sticky="ew")
-        self.info_card.grid_columnconfigure((0, 1, 2), weight=1)
+        self.info_card.grid_columnconfigure((0, 1, 2, 3), weight=1)
 
         # Connection Mode
-        ctk.CTkLabel(self.info_card, text="CONNECTION", font=ctk.CTkFont(size=11, weight="bold"), text_color="#6B7280").grid(row=0, column=0, padx=12, pady=(12, 2))
+        ctk.CTkLabel(self.info_card, text="CONNECTION", font=ctk.CTkFont(size=11, weight="bold"), text_color="#6B7280").grid(row=0, column=0, padx=8, pady=(12, 2))
         self.lbl_mode = ctk.CTkLabel(self.info_card, text="None", font=ctk.CTkFont(size=14, weight="bold"), text_color="#E5E7EB")
-        self.lbl_mode.grid(row=1, column=0, padx=12, pady=(0, 12))
+        self.lbl_mode.grid(row=1, column=0, padx=8, pady=(0, 12))
 
         # Device Model
-        ctk.CTkLabel(self.info_card, text="CONTROLLER", font=ctk.CTkFont(size=11, weight="bold"), text_color="#6B7280").grid(row=0, column=1, padx=12, pady=(12, 2))
+        ctk.CTkLabel(self.info_card, text="CONTROLLER", font=ctk.CTkFont(size=11, weight="bold"), text_color="#6B7280").grid(row=0, column=1, padx=8, pady=(12, 2))
         self.lbl_device = ctk.CTkLabel(self.info_card, text="Not Connected", font=ctk.CTkFont(size=14, weight="bold"), text_color="#E5E7EB")
-        self.lbl_device.grid(row=1, column=1, padx=12, pady=(0, 12))
+        self.lbl_device.grid(row=1, column=1, padx=8, pady=(0, 12))
+
+        # Emulation Mode
+        ctk.CTkLabel(self.info_card, text="OUTPUT", font=ctk.CTkFont(size=11, weight="bold"), text_color="#6B7280").grid(row=0, column=2, padx=8, pady=(12, 2))
+        self.lbl_emulation = ctk.CTkLabel(self.info_card, text="Xbox 360", font=ctk.CTkFont(size=14, weight="bold"), text_color="#E5E7EB")
+        self.lbl_emulation.grid(row=1, column=2, padx=8, pady=(0, 12))
 
         # Battery
-        ctk.CTkLabel(self.info_card, text="BATTERY", font=ctk.CTkFont(size=11, weight="bold"), text_color="#6B7280").grid(row=0, column=2, padx=12, pady=(12, 2))
+        ctk.CTkLabel(self.info_card, text="BATTERY", font=ctk.CTkFont(size=11, weight="bold"), text_color="#6B7280").grid(row=0, column=3, padx=8, pady=(12, 2))
         self.lbl_battery = ctk.CTkLabel(self.info_card, text="-- %", font=ctk.CTkFont(size=14, weight="bold"), text_color="#10B981")
-        self.lbl_battery.grid(row=1, column=2, padx=12, pady=(0, 12))
+        self.lbl_battery.grid(row=1, column=3, padx=8, pady=(0, 12))
 
         # --- Interactive Controller Visualizer ---
         viz_frame = ctk.CTkFrame(content_frame, fg_color="#1C1C1E", corner_radius=14)
@@ -285,6 +493,75 @@ class Switch2ProApp(ctk.CTk):
                 badge.grid(row=row_idx, column=start_col + i, padx=3, pady=3, sticky="ew")
                 self.btn_badges[name] = badge
 
+        # 6-Axis IMU Motion Sensors Box
+        imu_card = ctk.CTkFrame(viz_frame, fg_color="#141416", corner_radius=10)
+        imu_card.grid(row=3, column=0, columnspan=2, padx=16, pady=(0, 16), sticky="ew")
+        imu_card.grid_columnconfigure(0, weight=1)
+
+        imu_header = ctk.CTkFrame(imu_card, fg_color="transparent")
+        imu_header.grid(row=0, column=0, padx=12, pady=(10, 6), sticky="ew")
+        imu_header.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            imu_header,
+            text="MOTION SENSORS (6-AXIS IMU)",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#9CA3AF",
+        ).grid(row=0, column=0, sticky="w")
+
+        self.imu_status_pill = ctk.CTkLabel(
+            imu_header,
+            text="○ IMU N/A",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#6B7280",
+            fg_color="#262626",
+            corner_radius=8,
+            padx=8,
+            pady=2,
+        )
+        self.imu_status_pill.grid(row=0, column=1, sticky="e")
+        self.lbl_imu_status = self.imu_status_pill
+
+        telemetry_frame = ctk.CTkFrame(imu_card, fg_color="transparent")
+        telemetry_frame.grid(row=1, column=0, padx=12, pady=(0, 10), sticky="ew")
+        telemetry_frame.grid_columnconfigure((0, 1), weight=1)
+
+        accel_box = ctk.CTkFrame(telemetry_frame, fg_color="#1C1C1E", corner_radius=8)
+        accel_box.grid(row=0, column=0, padx=(0, 6), pady=4, sticky="ew")
+        accel_box.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            accel_box,
+            text="ACCEL (g)",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#6B7280",
+        ).pack(anchor="w", padx=10, pady=(6, 2))
+        self.lbl_accel = ctk.CTkLabel(
+            accel_box,
+            text="X: --       Y: --       Z: --",
+            font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
+            text_color="#38BDF8",
+        )
+        self.lbl_accel.pack(anchor="w", padx=10, pady=(0, 6))
+        self.lbl_imu_accel = self.lbl_accel
+
+        gyro_box = ctk.CTkFrame(telemetry_frame, fg_color="#1C1C1E", corner_radius=8)
+        gyro_box.grid(row=0, column=1, padx=(6, 0), pady=4, sticky="ew")
+        gyro_box.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            gyro_box,
+            text="GYRO (°/s)",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#6B7280",
+        ).pack(anchor="w", padx=10, pady=(6, 2))
+        self.lbl_gyro = ctk.CTkLabel(
+            gyro_box,
+            text="P: --       Y: --       R: --",
+            font=ctk.CTkFont(family="Consolas", size=12, weight="bold"),
+            text_color="#38BDF8",
+        )
+        self.lbl_gyro.pack(anchor="w", padx=10, pady=(0, 6))
+        self.lbl_imu_gyro = self.lbl_gyro
+
         # --- Preferences Card ---
         pref_frame = ctk.CTkFrame(content_frame, fg_color="#1C1C1E", corner_radius=14)
         pref_frame.grid(row=4, column=0, pady=(0, 20), sticky="ew")
@@ -297,30 +574,65 @@ class Switch2ProApp(ctk.CTk):
             text_color="#6B7280",
         ).grid(row=0, column=0, columnspan=2, padx=16, pady=(12, 8), sticky="w")
 
-        # Button Layout
-        ctk.CTkLabel(pref_frame, text="Button Layout:", font=ctk.CTkFont(size=13)).grid(row=1, column=0, padx=16, pady=8, sticky="w")
+        # Output Controller Mode (Row 1)
+        ctk.CTkLabel(pref_frame, text="Output Controller:", font=ctk.CTkFont(size=13)).grid(
+            row=1, column=0, padx=16, pady=8, sticky="w"
+        )
+        self.output_mode_selector = ctk.CTkSegmentedButton(
+            pref_frame,
+            values=["Xbox 360", "DualShock 4 (Motion)"],
+            command=self._on_output_mode_changed,
+        )
+        self.output_mode_selector.set("Xbox 360")
+        self.output_mode_selector.grid(row=1, column=1, padx=16, pady=8, sticky="ew")
+        self.mode_selector = self.output_mode_selector
+
+        # Cemuhook DSU Server (Row 2)
+        ctk.CTkLabel(pref_frame, text="Cemuhook DSU Server:", font=ctk.CTkFont(size=13)).grid(
+            row=2, column=0, padx=16, pady=8, sticky="w"
+        )
+        dsu_box = ctk.CTkFrame(pref_frame, fg_color="transparent")
+        dsu_box.grid(row=2, column=1, padx=16, pady=8, sticky="e")
+        self.lbl_dsu_status = ctk.CTkLabel(
+            dsu_box,
+            text="○ Inactive (Port 26760)",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#6B7280",
+        )
+        self.lbl_dsu_status.pack(side="left", padx=(0, 10))
+        self.switch_dsu = ctk.CTkSwitch(
+            dsu_box,
+            text="",
+            command=self._on_dsu_switch_changed,
+            width=46,
+        )
+        self.switch_dsu.deselect()
+        self.switch_dsu.pack(side="left")
+
+        # Button Layout (Row 3)
+        ctk.CTkLabel(pref_frame, text="Button Layout:", font=ctk.CTkFont(size=13)).grid(row=3, column=0, padx=16, pady=8, sticky="w")
         self.layout_selector = ctk.CTkSegmentedButton(
             pref_frame,
             values=["Nintendo (Physical)", "Xbox (Letters)"],
             command=self._on_layout_changed,
         )
         self.layout_selector.set("Nintendo (Physical)")
-        self.layout_selector.grid(row=1, column=1, padx=16, pady=8, sticky="ew")
+        self.layout_selector.grid(row=3, column=1, padx=16, pady=8, sticky="ew")
 
-        # Auto Connect Switch
-        ctk.CTkLabel(pref_frame, text="Auto-Connect on USB/Sync:", font=ctk.CTkFont(size=13)).grid(row=2, column=0, padx=16, pady=8, sticky="w")
+        # Auto Connect Switch (Row 4)
+        ctk.CTkLabel(pref_frame, text="Auto-Connect on USB/Sync:", font=ctk.CTkFont(size=13)).grid(row=4, column=0, padx=16, pady=8, sticky="w")
         self.switch_auto = ctk.CTkSwitch(
             pref_frame,
             text="",
             command=self._on_auto_switch_changed,
         )
         self.switch_auto.select()
-        self.switch_auto.grid(row=2, column=1, padx=16, pady=8, sticky="e")
+        self.switch_auto.grid(row=4, column=1, padx=16, pady=8, sticky="e")
 
-        # Deadzone Slider
-        ctk.CTkLabel(pref_frame, text="Stick Deadzone:", font=ctk.CTkFont(size=13)).grid(row=3, column=0, padx=16, pady=8, sticky="w")
+        # Deadzone Slider (Row 5)
+        ctk.CTkLabel(pref_frame, text="Stick Deadzone:", font=ctk.CTkFont(size=13)).grid(row=5, column=0, padx=16, pady=8, sticky="w")
         deadzone_box = ctk.CTkFrame(pref_frame, fg_color="transparent")
-        deadzone_box.grid(row=3, column=1, padx=16, pady=8, sticky="ew")
+        deadzone_box.grid(row=5, column=1, padx=16, pady=8, sticky="ew")
         deadzone_box.grid_columnconfigure(0, weight=1)
 
         self.slider_deadzone = ctk.CTkSlider(
@@ -351,9 +663,9 @@ class Switch2ProApp(ctk.CTk):
         }
         paddle_options_list = list(self._paddle_choices.keys())
 
-        # Grip Left (GL) Back Paddle Mapping
+        # Grip Left (GL) Back Paddle Mapping (Row 6)
         ctk.CTkLabel(pref_frame, text="GL Paddle (Back-L):", font=ctk.CTkFont(size=13)).grid(
-            row=4, column=0, padx=16, pady=8, sticky="w"
+            row=6, column=0, padx=16, pady=8, sticky="w"
         )
         self.gl_selector = ctk.CTkOptionMenu(
             pref_frame,
@@ -364,11 +676,11 @@ class Switch2ProApp(ctk.CTk):
             button_hover_color="#0369A1",
         )
         self.gl_selector.set("L3 (Left Stick Click)")
-        self.gl_selector.grid(row=4, column=1, padx=16, pady=8, sticky="ew")
+        self.gl_selector.grid(row=6, column=1, padx=16, pady=8, sticky="ew")
 
-        # Grip Right (GR) Back Paddle Mapping
+        # Grip Right (GR) Back Paddle Mapping (Row 7)
         ctk.CTkLabel(pref_frame, text="GR Paddle (Back-R):", font=ctk.CTkFont(size=13)).grid(
-            row=5, column=0, padx=16, pady=(8, 16), sticky="w"
+            row=7, column=0, padx=16, pady=8, sticky="w"
         )
         self.gr_selector = ctk.CTkOptionMenu(
             pref_frame,
@@ -379,7 +691,33 @@ class Switch2ProApp(ctk.CTk):
             button_hover_color="#0369A1",
         )
         self.gr_selector.set("R3 (Right Stick Click)")
-        self.gr_selector.grid(row=5, column=1, padx=16, pady=(8, 16), sticky="ew")
+        self.gr_selector.grid(row=7, column=1, padx=16, pady=8, sticky="ew")
+
+        # Haptic Vibration / HD Rumble (Row 8)
+        ctk.CTkLabel(pref_frame, text="Haptic Vibration (Rumble):", font=ctk.CTkFont(size=13)).grid(
+            row=8, column=0, padx=16, pady=(8, 16), sticky="w"
+        )
+        rumble_box = ctk.CTkFrame(pref_frame, fg_color="transparent")
+        rumble_box.grid(row=8, column=1, padx=16, pady=(8, 16), sticky="e")
+        self.btn_test_rumble = ctk.CTkButton(
+            rumble_box,
+            text="Test",
+            width=54,
+            height=24,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="#262626",
+            hover_color="#374151",
+            command=self._on_test_rumble_clicked,
+        )
+        self.btn_test_rumble.pack(side="left", padx=(0, 10))
+        self.switch_rumble = ctk.CTkSwitch(
+            rumble_box,
+            text="",
+            command=self._on_rumble_switch_changed,
+            width=46,
+        )
+        self.switch_rumble.select()
+        self.switch_rumble.pack(side="left")
 
         # 3. Footer Frame (Author Attribution & Link)
         footer_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -455,34 +793,50 @@ class Switch2ProApp(ctk.CTk):
             self.manager.connect_single_click()
 
     def _get_settings_path(self) -> str:
-        app_data = os.getenv("APPDATA")
-        if app_data:
-            folder = os.path.join(app_data, "Switch2ProConnect")
-            os.makedirs(folder, exist_ok=True)
-            return os.path.join(folder, "settings.json")
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+        if getattr(self, "settings_file", None):
+            parent = os.path.dirname(self.settings_file)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            return self.settings_file
+        return get_settings_path()
 
     def _save_settings(self):
         try:
             settings = {
+                "output_mode": self.manager.output_mode,
+                "dsu_enabled": self.manager.dsu_enabled,
                 "layout": self.manager.button_layout,
                 "deadzone": self.manager.deadzone,
                 "auto_connect": self.manager.auto_connect_enabled,
-                "gl_mapping": self.manager.virtual_gamepad.gl_mapping,
-                "gr_mapping": self.manager.virtual_gamepad.gr_mapping,
+                "gl_mapping": getattr(self.manager.virtual_gamepad, "gl_mapping", "L3"),
+                "gr_mapping": getattr(self.manager.virtual_gamepad, "gr_mapping", "R3"),
+                "rumble_enabled": getattr(self.manager, "rumble_enabled", True),
             }
-            with open(self._get_settings_path(), "w", encoding="utf-8") as f:
-                json.dump(settings, f, indent=2)
+            save_settings(settings, self._get_settings_path())
         except Exception:
             pass
 
     def _load_settings(self):
         try:
-            path = self._get_settings_path()
-            if not os.path.exists(path):
-                return
-            with open(path, "r", encoding="utf-8") as f:
-                settings = json.load(f)
+            settings = load_settings(self._get_settings_path())
+
+            out_mode = settings.get("output_mode", "xbox")
+            self.manager.set_output_mode(out_mode)
+            if hasattr(self, "output_mode_selector"):
+                self.output_mode_selector.set("DualShock 4 (Motion)" if out_mode == "ds4" else "Xbox 360")
+            if hasattr(self, "lbl_emulation"):
+                self.lbl_emulation.configure(text="DualShock 4" if out_mode == "ds4" else "Xbox 360")
+
+            dsu_en = bool(settings.get("dsu_enabled", False))
+            self.manager.set_dsu_enabled(dsu_en)
+            actual_dsu = self.manager.dsu_enabled
+            if hasattr(self, "switch_dsu"):
+                if actual_dsu:
+                    self.switch_dsu.select()
+                else:
+                    self.switch_dsu.deselect()
+            if hasattr(self, "lbl_dsu_status"):
+                self._update_dsu_status_label(actual_dsu)
 
             layout = settings.get("layout", "nintendo")
             self.manager.set_button_layout(layout)
@@ -493,6 +847,7 @@ class Switch2ProApp(ctk.CTk):
             self.manager.set_deadzone(deadzone)
             if hasattr(self, "slider_deadzone"):
                 self.slider_deadzone.set(deadzone)
+            if hasattr(self, "lbl_deadzone_val"):
                 self.lbl_deadzone_val.configure(text=f"{int(deadzone * 100)}%")
 
             auto_conn = bool(settings.get("auto_connect", True))
@@ -518,8 +873,55 @@ class Switch2ProApp(ctk.CTk):
                     if v == gr:
                         self.gr_selector.set(k)
                         break
+
+            rumble_en = bool(settings.get("rumble_enabled", True))
+            self.manager.set_rumble_enabled(rumble_en)
+            if hasattr(self, "switch_rumble"):
+                if rumble_en:
+                    self.switch_rumble.select()
+                else:
+                    self.switch_rumble.deselect()
         except Exception:
             pass
+
+    def _on_output_mode_changed(self, value: str):
+        val_str = str(value).lower()
+        mode = "ds4" if ("dualshock" in val_str or "ds4" in val_str) else "xbox"
+        self.manager.set_output_mode(mode)
+        if hasattr(self, "lbl_emulation"):
+            self.lbl_emulation.configure(text="DualShock 4" if mode == "ds4" else "Xbox 360")
+        if hasattr(self, "output_mode_selector"):
+            target_text = "DualShock 4 (Motion)" if mode == "ds4" else "Xbox 360"
+            if self.output_mode_selector.get() != target_text:
+                self.output_mode_selector.set(target_text)
+        self._save_settings()
+        self._on_status_message(f"Output mode switched to {'DualShock 4 (Motion)' if mode == 'ds4' else 'Xbox 360'}")
+
+    def _on_dsu_switch_changed(self):
+        target_enabled = bool(self.switch_dsu.get())
+        self.manager.set_dsu_enabled(target_enabled)
+        actual = self.manager.dsu_enabled
+        if actual != target_enabled:
+            if actual:
+                self.switch_dsu.select()
+            else:
+                self.switch_dsu.deselect()
+        self._update_dsu_status_label(actual)
+        self._save_settings()
+
+    def _update_dsu_status_label(self, enabled: bool):
+        port = getattr(getattr(self.manager, "dsu_server", None), "port", 26760)
+        if hasattr(self, "lbl_dsu_status"):
+            if enabled:
+                self.lbl_dsu_status.configure(
+                    text=f"● Active (Port {port})",
+                    text_color="#10B981",
+                )
+            else:
+                self.lbl_dsu_status.configure(
+                    text=f"○ Inactive (Port {port})",
+                    text_color="#6B7280",
+                )
 
     def _on_layout_changed(self, value):
         layout = "nintendo" if "Nintendo" in value else "xbox"
@@ -542,10 +944,40 @@ class Switch2ProApp(ctk.CTk):
         self.manager.auto_connect_enabled = bool(self.switch_auto.get())
         self._save_settings()
 
+    def _on_rumble_switch_changed(self):
+        enabled = bool(self.switch_rumble.get())
+        self.manager.set_rumble_enabled(enabled)
+        self._save_settings()
+        self._on_status_message(f"Haptic vibration {'enabled' if enabled else 'disabled'}")
+
+    def _on_test_rumble_clicked(self):
+        if not self.manager.rumble_enabled:
+            self._on_status_message("Enable Haptic Vibration first to run a rumble test.")
+            return
+        self.manager.test_rumble_pulse(duration_sec=0.20)
+        self._on_status_message("Triggered haptic test pulse.")
+
     def _on_deadzone_changed(self, val):
         self.lbl_deadzone_val.configure(text=f"{int(val * 100)}%")
         self.manager.set_deadzone(float(val))
         self._save_settings()
+
+    def _on_window_close(self):
+        """Cleanly shutdown background manager and destroy window."""
+        self.destroy()
+
+    def destroy(self):
+        """Cleanly cancel timers, shutdown manager, and destroy window."""
+        try:
+            if hasattr(self, "_visualizer_timer_id"):
+                self.after_cancel(self._visualizer_timer_id)
+        except Exception:
+            pass
+        try:
+            self.manager.shutdown()
+        except Exception:
+            pass
+        super().destroy()
 
     def _on_connection_changed(self, connected: bool, transport: str, device_name: str, battery: int):
         """Called thread-safely by ControllerManager."""
@@ -557,6 +989,11 @@ class Switch2ProApp(ctk.CTk):
     def _update_connection_ui(self, connected: bool, transport: str, device_name: str, battery: int):
         self.is_connected = connected
         self.btn_main.configure(state="normal")
+
+        out_mode = getattr(self.manager, "output_mode", "xbox")
+        emulation_text = "DualShock 4" if out_mode == "ds4" else "Xbox 360"
+        if hasattr(self, "lbl_emulation"):
+            self.lbl_emulation.configure(text=emulation_text)
 
         if connected:
             self.btn_main.configure(
@@ -607,9 +1044,13 @@ class Switch2ProApp(ctk.CTk):
             state = self._latest_state
             if state is not None and self.is_connected:
                 self._render_live_inputs_optimized(state)
-            self.after(16, self._visualizer_tick)
         except Exception:
             pass
+        finally:
+            try:
+                self._visualizer_timer_id = self.after(16, self._visualizer_tick)
+            except Exception:
+                pass
 
     def _on_input_update(self, state: ControllerState):
         """Receive live input data from controller (called on high-speed USB/BLE thread).
@@ -662,6 +1103,45 @@ class Switch2ProApp(ctk.CTk):
                         text_color=active_text if active else dim_text,
                     )
 
+        # 4. 6-Axis IMU Motion Sensors Dirty-Checking
+        status_text, text_color, fg_color = determine_imu_status(state, self.is_connected)
+        if status_text != self._prev_imu_status:
+            self._prev_imu_status = status_text
+            if hasattr(self, "imu_status_pill"):
+                self.imu_status_pill.configure(
+                    text=status_text,
+                    text_color=text_color,
+                    fg_color=fg_color,
+                )
+
+        if not getattr(state, "has_motion", False):
+            if self._prev_ax != 0.0 or self._prev_ay != 0.0 or self._prev_az != 0.0:
+                if hasattr(self, "lbl_accel"):
+                    self.lbl_accel.configure(text="X: --       Y: --       Z: --")
+                if hasattr(self, "lbl_gyro"):
+                    self.lbl_gyro.configure(text="P: --       Y: --       R: --")
+                self._prev_ax, self._prev_ay, self._prev_az = 0.0, 0.0, 0.0
+                self._prev_gx, self._prev_gy, self._prev_gz = 0.0, 0.0, 0.0
+            return
+
+        # Accelerometer dirty-check (deadband 0.02 g)
+        if (abs(state.accel_x - self._prev_ax) > 0.02 or
+            abs(state.accel_y - self._prev_ay) > 0.02 or
+            abs(state.accel_z - self._prev_az) > 0.02):
+            self._prev_ax, self._prev_ay, self._prev_az = state.accel_x, state.accel_y, state.accel_z
+            accel_str, _ = format_imu_telemetry(state)
+            if hasattr(self, "lbl_accel"):
+                self.lbl_accel.configure(text=accel_str)
+
+        # Gyroscope dirty-check (deadband 1.0 deg/s)
+        if (abs(state.gyro_x - self._prev_gx) > 1.0 or
+            abs(state.gyro_y - self._prev_gy) > 1.0 or
+            abs(state.gyro_z - self._prev_gz) > 1.0):
+            self._prev_gx, self._prev_gy, self._prev_gz = state.gyro_x, state.gyro_y, state.gyro_z
+            _, gyro_str = format_imu_telemetry(state)
+            if hasattr(self, "lbl_gyro"):
+                self.lbl_gyro.configure(text=gyro_str)
+
     def _reset_button_badges(self):
         """Reset badges and caches to initial dimmed state."""
         self._prev_buttons.clear()
@@ -670,9 +1150,26 @@ class Switch2ProApp(ctk.CTk):
         self._prev_rx = 0.0
         self._prev_ry = 0.0
         self._prev_battery = -1
+        self._prev_imu_status = ""
+        self._prev_ax = 0.0
+        self._prev_ay = 0.0
+        self._prev_az = 0.0
+        self._prev_gx = 0.0
+        self._prev_gy = 0.0
+        self._prev_gz = 0.0
         self._latest_state = None
         for badge in self.btn_badges.values():
             badge.configure(fg_color="#262626", text_color="#6B7280")
+        if hasattr(self, "imu_status_pill"):
+            self.imu_status_pill.configure(text="○ IMU N/A", text_color="#6B7280", fg_color="#262626")
+        if hasattr(self, "lbl_accel"):
+            self.lbl_accel.configure(text="X: --       Y: --       Z: --")
+        if hasattr(self, "lbl_gyro"):
+            self.lbl_gyro.configure(text="P: --       Y: --       R: --")
+
+    def _reset_visualizer(self):
+        """Reset visualizer state and caches (alias for _reset_button_badges)."""
+        self._reset_button_badges()
 
 
 def run_gui():

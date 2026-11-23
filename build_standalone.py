@@ -56,6 +56,22 @@ You can map the rear grip buttons to any controller button (or disable them)
 under the Settings menu in the app.
 
 ----------------------------------------------------------------------
+4. GYROSCOPE / MOTION CONTROLS (v2.0)
+----------------------------------------------------------------------
+* DUALSHOCK 4 (MOTION) MODE (Fortnite, Call of Duty, Steam Input):
+  Select "DualShock 4 (Motion)" under Output Mode in Settings to expose 
+  native 6-axis gyroscope and accelerometer motion via ViGEmBus.
+
+* CEMUHOOK DSU SERVER (Emulators: Cemu, Dolphin, Ryujinx, Yuzu):
+  Enable the Cemuhook DSU Server toggle in Settings to stream 6-axis motion
+  data over UDP port 26760 directly to your emulator.
+
+* HAPTIC VIBRATION / HD RUMBLE 2:
+  Game vibration forces are translated automatically to your controller's
+  dual actuators in both Xbox 360 and DualShock 4 modes. You can toggle or
+  test haptics directly in Settings.
+
+----------------------------------------------------------------------
 DISCLAIMER
 ----------------------------------------------------------------------
 This project is an independent open-source utility developed solely 
@@ -100,7 +116,7 @@ def main():
 
     # 3. Create Distribution Package
     print("\n[2/3] Assembling distribution release package...")
-    release_name = "Switch2ProBridge-v1.0.0-Windows-x64"
+    release_name = "Switch2ProBridge-v2.0.0-Windows-x64"
     release_dir = os.path.join(DIST_DIR, release_name)
     os.makedirs(release_dir, exist_ok=True)
 

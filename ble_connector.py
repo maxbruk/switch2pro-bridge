@@ -1,6 +1,7 @@
 """Bluetooth Low Energy (BLE) connector and pairing protocol for Nintendo Switch 2 Pro Controller."""
 
 import asyncio
+import time
 import uuid
 import logging
 import threading
@@ -20,6 +21,7 @@ from constants import (
     SW2_SERVICE_UUID,
     INPUT_REPORT_UUID,
     COMMAND_WRITE_UUID,
+    VIBRATION_WRITE_PRO_UUID,
     COMMAND_PAIR,
     SUBCOMMAND_PAIR_SET_MAC,
     SUBCOMMAND_PAIR_STEP1,
@@ -27,8 +29,9 @@ from constants import (
     SUBCOMMAND_PAIR_FINISH,
     PAIRING_STEP1_BYTES,
     PAIRING_STEP2_BYTES,
+    RUMBLE_INTERVAL_SEC,
 )
-from report_parser import parse_input_report, ControllerState
+from report_parser import parse_input_report, build_switch2_rumble_packet, ControllerState
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,22 @@ class BleProConnector:
         self._stop_event = threading.Event()
         self._scanner: Optional[BleakScanner] = None
         self._lock = threading.Lock()
+        self._rumble_seq: int = 0
+        self._rumble_large: int = 0
+        self._rumble_small: int = 0
+        self._rumble_intensity: float = 1.0
+        self._rumble_updated: bool = False
+        self._last_rumble_send_time: float = 0.0
+        self._last_rumble_set_time: float = 0.0
+
+    def set_rumble(self, large_motor: int, small_motor: int, intensity: float = 1.0) -> bool:
+        """Queue an HD Rumble 2 update for the BLE GATT notification loop."""
+        self._rumble_large = max(0, min(255, int(large_motor)))
+        self._rumble_small = max(0, min(255, int(small_motor)))
+        self._rumble_intensity = max(0.0, min(1.0, float(intensity)))
+        self._rumble_updated = True
+        self._last_rumble_set_time = time.monotonic()
+        return bool(self.is_connected and self.client is not None)
 
     def start_connection(self):
         """Start background asyncio worker thread to scan and connect via BLE."""
@@ -231,6 +250,12 @@ class BleProConnector:
             except Exception as e:
                 logger.debug("Set Player LED notice: %s", e)
 
+            # Enable 6-axis IMU / motion sensor streaming
+            try:
+                await self._enable_imu_features()
+            except Exception as e:
+                logger.debug("Enable IMU features notice: %s", e)
+
             # Subscribe to input report characteristic notifications
             if self.on_status:
                 self.on_status("Subscribing to input reports...")
@@ -247,9 +272,31 @@ class BleProConnector:
                 self.on_status("Connected via Bluetooth!")
             logger.info("BLE input report streaming active.")
 
-            # Keep loop alive while connected
+            # Keep loop alive while connected and stream HD Rumble 2 frames
             while not self._stop_event.is_set() and self.client.is_connected:
-                await asyncio.sleep(0.5)
+                now = time.monotonic()
+                if (self._rumble_large > 0 or self._rumble_small > 0) and (now - self._last_rumble_set_time) > 5.0:
+                    self._rumble_large = 0
+                    self._rumble_small = 0
+                    self._rumble_updated = True
+
+                if self._rumble_updated or self._rumble_large > 0 or self._rumble_small > 0:
+                    pkt = build_switch2_rumble_packet(
+                        self._rumble_large,
+                        self._rumble_small,
+                        seq=self._rumble_seq,
+                        include_report_id=False,
+                        intensity=self._rumble_intensity,
+                    )
+                    self._rumble_seq = (self._rumble_seq + 1) & 0x0F
+                    self._rumble_updated = False
+                    self._last_rumble_send_time = now
+                    try:
+                        await self.client.write_gatt_char(VIBRATION_WRITE_PRO_UUID, pkt, response=False)
+                    except Exception as r_err:
+                        logger.debug("BLE rumble GATT write notice: %s", r_err)
+
+                await asyncio.sleep(RUMBLE_INTERVAL_SEC)
 
         except Exception as e:
             err_type = type(e).__name__
@@ -310,10 +357,26 @@ class BleProConnector:
         await self._write_command(COMMAND_LEDS, SUBCOMMAND_LEDS_SET_PLAYER, data)
         logger.info("Set controller Player %d LED solid.", player_number)
 
+    async def _enable_imu_features(self):
+        """Enable Switch 2 controller feature mask (including 6-axis IMU sensors) over BLE."""
+        COMMAND_FEATURE = 0x0C
+        SUBCOMMAND_FEATURE_INIT = 0x02
+        SUBCOMMAND_FEATURE_ENABLE = 0x04
+        feature_mask = bytes([0x27, 0x00, 0x00, 0x00])
+        await self._write_command(COMMAND_FEATURE, SUBCOMMAND_FEATURE_INIT, feature_mask)
+        await asyncio.sleep(0.02)
+        await self._write_command(COMMAND_FEATURE, SUBCOMMAND_FEATURE_ENABLE, feature_mask)
+        logger.info("Enabled BLE controller 6-axis IMU feature mask.")
+
     async def _async_disconnect(self):
         """Asynchronously disconnect GATT client."""
         self.is_connected = False
         if self.client and self.client.is_connected:
+            try:
+                stop_pkt = build_switch2_rumble_packet(0, 0, seq=self._rumble_seq, include_report_id=False)
+                await self.client.write_gatt_char(VIBRATION_WRITE_PRO_UUID, stop_pkt, response=False)
+            except Exception:
+                pass
             try:
                 await self.client.stop_notify(INPUT_REPORT_UUID)
             except Exception:

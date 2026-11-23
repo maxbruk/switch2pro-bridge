@@ -21,8 +21,9 @@ from constants import (
     PRO2_OUTPUT_REPORT_BODY_SIZE,
     USB_STARTUP_COMMANDS,
     USB_INPUT_REPORT_SIZE,
+    RUMBLE_INTERVAL_SEC,
 )
-from report_parser import parse_input_report, ControllerState
+from report_parser import parse_input_report, build_switch2_rumble_packet, ControllerState
 
 # Enable 1ms high-resolution timer for Windows scheduler
 try:
@@ -221,6 +222,15 @@ def send_winusb_startup_commands(product_id: int = SWITCH2_PRO_PID) -> bool:
         ctypes.POINTER(wintypes.ULONG), ctypes.c_void_p
     ]
     winusb.WinUsb_WritePipe.restype = wintypes.BOOL
+    winusb.WinUsb_ReadPipe.argtypes = [
+        wintypes.HANDLE, ctypes.c_ubyte, ctypes.POINTER(ctypes.c_ubyte), wintypes.ULONG,
+        ctypes.POINTER(wintypes.ULONG), ctypes.c_void_p
+    ]
+    winusb.WinUsb_ReadPipe.restype = wintypes.BOOL
+    winusb.WinUsb_SetPipePolicy.argtypes = [
+        wintypes.HANDLE, ctypes.c_ubyte, wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p
+    ]
+    winusb.WinUsb_SetPipePolicy.restype = wintypes.BOOL
     winusb.WinUsb_Free.argtypes = [wintypes.HANDLE]
 
     for p in paths:
@@ -240,18 +250,36 @@ def send_winusb_startup_commands(product_id: int = SWITCH2_PRO_PID) -> bool:
             desc = USB_INTERFACE_DESCRIPTOR()
             winusb.WinUsb_QueryInterfaceSettings(uh, 0, ctypes.byref(desc))
             ep_out = 0x02  # Default Switch 2 bulk command out endpoint
+            ep_in = 0x82   # Default Switch 2 bulk command in endpoint
             for i in range(desc.bNumEndpoints):
                 pipe = WINUSB_PIPE_INFORMATION()
                 if winusb.WinUsb_QueryPipe(uh, 0, i, ctypes.byref(pipe)):
-                    if pipe.PipeType == 2 and (pipe.PipeId & 0x80) == 0:
-                        ep_out = pipe.PipeId
-                        break
+                    if pipe.PipeType == 2:
+                        if (pipe.PipeId & 0x80) == 0:
+                            ep_out = pipe.PipeId
+                        else:
+                            ep_in = pipe.PipeId
+
+            # Set PIPE_TRANSFER_TIMEOUT (policy ID 3) to 50ms so reads never hang
+            timeout_ms = wintypes.ULONG(50)
+            winusb.WinUsb_SetPipePolicy(uh, ep_out, 3, ctypes.sizeof(timeout_ms), ctypes.byref(timeout_ms))
+            winusb.WinUsb_SetPipePolicy(uh, ep_in, 3, ctypes.sizeof(timeout_ms), ctypes.byref(timeout_ms))
+
+            # Drain any stale pending responses on ep_in before issuing commands
+            rbuf = (ctypes.c_ubyte * 64)()
+            r = wintypes.ULONG()
+            for _ in range(8):
+                r.value = 0
+                if not winusb.WinUsb_ReadPipe(uh, ep_in, rbuf, 64, ctypes.byref(r), None) or r.value == 0:
+                    break
 
             for cmd in USB_STARTUP_COMMANDS:
                 buf = (ctypes.c_ubyte * len(cmd)).from_buffer_copy(cmd)
                 w = wintypes.ULONG()
                 winusb.WinUsb_WritePipe(uh, ep_out, buf, len(cmd), ctypes.byref(w), None)
                 time.sleep(0.02)
+                # Consume the command response from ep_in so the USB IN FIFO never stalls
+                winusb.WinUsb_ReadPipe(uh, ep_in, rbuf, 64, ctypes.byref(r), None)
 
             logger.info("WinUSB startup handshake delivered to %s successfully.", p)
             return True
@@ -309,6 +337,14 @@ class UsbProConnector:
         self._stop_event = threading.Event()
         self._read_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._rumble_seq: int = 0
+        self._rumble_large: int = 0
+        self._rumble_small: int = 0
+        self._rumble_intensity: float = 1.0
+        self._rumble_updated: bool = False
+        self._last_rumble_send_time: float = 0.0
+        self._last_rumble_set_time: float = 0.0
 
     def connect(self, device_info: Optional[Dict[str, Any]] = None) -> bool:
         """Connect to controller, perform the USB handshake, and start reading inputs."""
@@ -383,6 +419,7 @@ class UsbProConnector:
 
         while not self._stop_event.is_set() and self.dev is not None:
             try:
+                self._send_rumble_if_due(force=False)
                 data = self.dev.read(USB_INPUT_REPORT_SIZE, timeout_ms=20)
                 if not data:
                     continue
@@ -406,6 +443,57 @@ class UsbProConnector:
             except Exception:
                 pass
 
+    def set_rumble(self, large_motor: int, small_motor: int, intensity: float = 1.0) -> bool:
+        """Queue or transmit an HD Rumble 2 command to the wired USB controller."""
+        with self._write_lock:
+            self._rumble_large = max(0, min(255, int(large_motor)))
+            self._rumble_small = max(0, min(255, int(small_motor)))
+            self._rumble_intensity = max(0.0, min(1.0, float(intensity)))
+            self._rumble_updated = True
+            self._last_rumble_set_time = time.monotonic()
+        return self._send_rumble_if_due(force=True)
+
+    def _send_rumble_if_due(self, force: bool = False) -> bool:
+        """Send an HD Rumble 2 output report over USB HID if active or newly updated."""
+        with self._write_lock:
+            dev = self.dev
+            if dev is None or not self.is_connected:
+                return False
+
+            now = time.monotonic()
+            # 5-second watchdog prevents motors staying stuck if a game exits abruptly
+            if (self._rumble_large > 0 or self._rumble_small > 0) and (now - self._last_rumble_set_time) > 5.0:
+                self._rumble_large = 0
+                self._rumble_small = 0
+                self._rumble_updated = True
+
+            is_stopping = (self._rumble_large == 0 and self._rumble_small == 0)
+            if not self._rumble_updated and is_stopping:
+                return True
+
+            if not (self._rumble_updated and is_stopping):
+                min_interval = 0.008 if force else RUMBLE_INTERVAL_SEC
+                if (now - self._last_rumble_send_time) < min_interval:
+                    return True
+
+            pkt = build_switch2_rumble_packet(
+                self._rumble_large,
+                self._rumble_small,
+                seq=self._rumble_seq,
+                include_report_id=True,
+                intensity=self._rumble_intensity,
+            )
+            self._rumble_seq = (self._rumble_seq + 1) & 0x0F
+            self._rumble_updated = False
+            self._last_rumble_send_time = now
+
+            try:
+                dev.write(pkt)
+                return True
+            except Exception as e:
+                logger.debug("USB rumble write error: %s", e)
+                return False
+
     def _cleanup(self):
         """Internal handle cleanup."""
         self.is_connected = False
@@ -418,6 +506,10 @@ class UsbProConnector:
 
     def disconnect(self):
         """Gracefully disconnect and close the USB handle."""
+        try:
+            self.set_rumble(0, 0)
+        except Exception:
+            pass
         self._stop_event.set()
         with self._lock:
             if self._read_thread and self._read_thread.is_alive():
